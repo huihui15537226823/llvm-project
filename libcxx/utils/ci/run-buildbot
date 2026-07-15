@@ -28,6 +28,16 @@ ${PROGNAME} [options] <BUILDER>
 --build-dir <DIR>   The directory to use for building the library. By default,
                     this is '<llvm-root>/build/<builder>'.
 
+--ohos-qemu <PATH>  Run OHOS tests under qemu-aarch64 instead of HDC. This also
+                    accepts OHOS_QEMU or QEMU from the environment.
+
+--ohos-qemu-sysroot <DIR>
+                    Sysroot passed to qemu-aarch64 with -L. Defaults to
+                    OHOS_QEMU_SYSROOT, QEMU_SYSROOT, then OHOS_SYSROOT.
+
+--ohos-hdc <PATH>   HDC binary to use when OHOS tests run on a device. This sets
+                    HDC for the OHOS HDC executor.
+
 Environment variables
 CC                  The C compiler to use, this value is used by CMake. This
                     variable is mandatory.
@@ -84,6 +94,19 @@ while [[ $# -gt 0 ]]; do
             BUILD_DIR="${2}"
             shift; shift
             ;;
+        --ohos-qemu)
+            OHOS_QEMU="${2}"
+            shift; shift
+            ;;
+        --ohos-qemu-sysroot)
+            OHOS_QEMU_SYSROOT="${2}"
+            shift; shift
+            ;;
+        --ohos-hdc)
+            HDC="${2}"
+            export HDC
+            shift; shift
+            ;;
         *)
             BUILDER="${1}"
             shift
@@ -114,6 +137,24 @@ ${CXX} --version
 
 function clean() {
     rm -rf "${BUILD_DIR}"
+}
+
+function require-env-var() {
+    local name="${1}"
+    if [[ -z ${!name+x} ]] || [[ -z "${!name}" ]]; then
+        error "Environment variable ${name} must be defined"
+        exit 1
+    fi
+}
+
+function ohos-lit-args() {
+    local args="-j1 -sv --xunit-xml-output test-results.xml --time-tests"
+    if python3 -c 'import psutil' >/dev/null 2>&1; then
+        args="${args} --timeout=1500"
+    else
+        echo "warning: python3 psutil not available; running OHOS lit without per-test timeout" >&2
+    fi
+    printf '%s' "${args}"
 }
 
 function generate-cmake-base() {
@@ -154,6 +195,49 @@ function generate-cmake-android() {
     generate-cmake-base \
           -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi" \
           -DLIBCXX_CXX_ABI=libcxxabi \
+          "${@}"
+}
+
+function setup-ohos-hdc-env() {
+    require-env-var OHOS_SYSROOT
+
+    OHOS_TARGET_TRIPLE="${OHOS_TARGET_TRIPLE:=aarch64-linux-ohos}"
+    OHOS_LIBCXX_ABI_NAMESPACE="${OHOS_LIBCXX_ABI_NAMESPACE:=__h}"
+    OHOS_QEMU="${OHOS_QEMU:-${QEMU:-}}"
+
+    if [[ -n "${OHOS_QEMU}" ]]; then
+        OHOS_QEMU_SYSROOT="${OHOS_QEMU_SYSROOT:-${QEMU_SYSROOT:-${OHOS_SYSROOT}}}"
+        OHOS_EXECUTOR="${MONOREPO_ROOT}/libcxx/utils/ci/vendor/ohos/qemu_run.py --qemu ${OHOS_QEMU} --sysroot ${OHOS_QEMU_SYSROOT}"
+        OHOS_EXECUTOR_KIND="ohos-qemu"
+    else
+        OHOS_EXECUTOR="${MONOREPO_ROOT}/libcxx/utils/ci/vendor/ohos/hdc_run.py"
+        OHOS_EXECUTOR_KIND="ohos-hdc"
+    fi
+
+    OHOS_LIT_PARAMS="executor=${OHOS_EXECUTOR};target_triple=${OHOS_TARGET_TRIPLE};executor_kind=${OHOS_EXECUTOR_KIND}"
+}
+
+function generate-cmake-ohos-hdc() {
+    setup-ohos-hdc-env
+
+    local lit_args
+    lit_args="$(ohos-lit-args)"
+
+    generate-cmake \
+          -DLLVM_LIT_ARGS="${lit_args}" \
+          -DCMAKE_SYSTEM_NAME=OHOS \
+          -DCMAKE_SYSROOT="${OHOS_SYSROOT}" \
+          -DCMAKE_C_COMPILER_TARGET="${OHOS_TARGET_TRIPLE}" \
+          -DCMAKE_CXX_COMPILER_TARGET="${OHOS_TARGET_TRIPLE}" \
+          -DCMAKE_ASM_COMPILER_TARGET="${OHOS_TARGET_TRIPLE}" \
+          -DLIBCXX_ABI_NAMESPACE="${OHOS_LIBCXX_ABI_NAMESPACE}" \
+          -DLIBCXX_INCLUDE_BENCHMARKS=OFF \
+          -DLIBCXX_TEST_CONFIG="llvm-libc++-ohos.cfg.in" \
+          -DLIBCXXABI_TEST_CONFIG="llvm-libc++abi-ohos.cfg.in" \
+          -DLIBUNWIND_TEST_CONFIG="llvm-libunwind-ohos.cfg.in" \
+          -DLIBCXX_TEST_PARAMS="${OHOS_LIT_PARAMS}" \
+          -DLIBCXXABI_TEST_PARAMS="${OHOS_LIT_PARAMS}" \
+          -DLIBUNWIND_TEST_PARAMS="${OHOS_LIT_PARAMS}" \
           "${@}"
 }
 
@@ -799,6 +883,13 @@ android-ndk-*)
     ninja -vC "${BUILD_DIR}" check-cxx
     step "Running the libc++abi tests"
     ninja -vC "${BUILD_DIR}" check-cxxabi
+;;
+ohos-aarch64-full|ohos-hdc-aarch64-full)
+    clean
+
+    generate-cmake-ohos-hdc
+
+    check-runtimes
 ;;
 #################################################################
 # Insert vendor-specific internal configurations below.

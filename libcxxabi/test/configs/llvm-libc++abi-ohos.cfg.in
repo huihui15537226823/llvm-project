@@ -1,0 +1,36 @@
+# This testing configuration handles running the test suite against LLVM's
+# libc++abi using HDC or QEMU on OHOS.
+
+lit_config.load_config(config, '@CMAKE_CURRENT_BINARY_DIR@/cmake-bridge.cfg')
+
+config.substitutions.append(('%{flags}',
+    '--sysroot @CMAKE_SYSROOT@' if '@CMAKE_SYSROOT@' else ''
+))
+config.substitutions.append(('%{compile_flags}',
+    '-nostdinc++ -I %{include} -I %{cxx-include} -I %{cxx-target-include} %{maybe-include-libunwind} -I %{libcxx}/test/support -I %{libcxx}/src -D_LIBCPP_ENABLE_CXX17_REMOVED_UNEXPECTED_FUNCTIONS'
+))
+config.substitutions.append(('%{link_flags}',
+    '-nostdlib++ -L %{lib} -lc++ -lc++abi -pthread'
+))
+config.substitutions.append(('%{exec}',
+    '%{executor} --execdir %{temp} -- '
+))
+
+import os, site
+site.addsitedir(os.path.join('@LIBCXXABI_LIBCXX_PATH@', 'utils'))
+import libcxx.test.params, libcxx.test.config
+
+executor_kind = lit_config.params.get(
+    'executor_kind', getattr(config, 'executor_kind', 'ohos-hdc')
+)
+if executor_kind not in ('ohos-hdc', 'ohos-qemu'):
+    lit_config.fatal(f'unsupported OHOS executor_kind: {executor_kind}')
+
+config.available_features.add(executor_kind)
+
+libcxx.test.config.configure(
+    libcxx.test.params.DEFAULT_PARAMETERS,
+    libcxx.test.features.DEFAULT_FEATURES,
+    config,
+    lit_config
+)
